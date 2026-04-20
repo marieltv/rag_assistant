@@ -1,4 +1,4 @@
-# DocMind — Document Q&A RAG Assistant
+# Document Q&A RAG Assistant
 
 End-to-end Retrieval-Augmented Generation (RAG) system for document question answering with source citations, similarity scores, and cross-encoder reranking.
 
