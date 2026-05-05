@@ -91,7 +91,7 @@ rag_assistant/
 pip install -r requirements.txt
 
 # 2. Configure environment
-cp .env.example .env
+copy .env.example .env
 # Edit .env and set OPENAI_API_KEY
 
 # 3. Start backend
