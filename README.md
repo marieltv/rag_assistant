@@ -61,7 +61,7 @@ End-to-end Retrieval-Augmented Generation (RAG) system for document question ans
 | Vector store | FAISS | Local, persisted. ChromaDB drop-in available |
 | Reranker | cross-encoder/ms-marco-MiniLM-L-6-v2 | CPU-friendly, ~80MB. Graceful fallback if missing |
 | RAG framework | LangChain | |
-| Backend API | FastAPI | |
+| Backend API | FastAPI |FastAPI backend available for production deployment behind a reverse proxy or on a separate service |
 | Frontend | Streamlit | |
 | Testing | pytest | 30 unit tests, no API key required |
 
