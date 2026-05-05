@@ -5,6 +5,7 @@
 
 # ── Secrets ───────────────────────────────────────────────────
 .env
+.streamlit/secrets.toml
 
 
 # ── Vector index & document metadata ─────────────────────────

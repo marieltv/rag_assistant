@@ -1,21 +1,35 @@
 """
-Streamlit UI — Document Q&A RAG Assistant
------------------------------------------
-Run: streamlit run frontend/app.py
-Requires: FastAPI backend running at http://localhost:8000
+Streamlit App — Document Q&A RAG Assistant
+-------------------------------------------
+Standalone: calls rag_pipeline.py directly, no FastAPI required.
+Deployable to Streamlit Cloud out of the box.
+
+Run locally:   streamlit run app.py
+Deploy:        push to GitHub → connect repo on share.streamlit.io
+               set OPENAI_API_KEY in Streamlit Cloud secrets
 """
 
-import streamlit as st
-import requests
-import json
 import os
+import tempfile
 from pathlib import Path
 
+import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from rag_pipeline import (
+    RAGConfig,
+    VectorStoreManager,
+    load_document,
+    chunk_documents,
+    query,
+)
+
 # ──────────────────────────────────────────────
-# Config
+# Page config
 # ──────────────────────────────────────────────
 
-API_URL = os.getenv("RAG_API_URL", "http://localhost:8000")
 SUPPORTED_TYPES = ["pdf", "docx", "doc", "csv", "txt", "md"]
 
 st.set_page_config(
@@ -26,24 +40,18 @@ st.set_page_config(
 )
 
 # ──────────────────────────────────────────────
-# Custom CSS
+# CSS
 # ──────────────────────────────────────────────
 
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
 
-html, body, [class*="css"] {
-    font-family: 'IBM Plex Sans', sans-serif;
-    background: #0f0f0f;
-    color: #e8e8e8;
-}
-
-.stApp { background: #0f0f0f; }
+html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 
 .source-card {
-    background: #1a1a1a;
-    border: 1px solid #2a2a2a;
+    background: #1a1a2e;
+    border: 1px solid #2a2a3e;
     border-left: 3px solid #00d4aa;
     border-radius: 4px;
     padding: 12px 16px;
@@ -62,60 +70,57 @@ html, body, [class*="css"] {
     font-size: 0.72rem;
     padding: 2px 8px;
     border-radius: 2px;
-    margin-left: 8px;
+    margin-left: 6px;
 }
 
-.answer-box {
-    background: #141414;
-    border: 1px solid #2a2a2a;
-    border-radius: 6px;
-    padding: 20px 24px;
-    margin: 12px 0;
-    line-height: 1.7;
+.rerank-badge {
+    display: inline-block;
+    background: #a78bfa22;
+    border: 1px solid #a78bfa55;
+    color: #a78bfa;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.72rem;
+    padding: 2px 8px;
+    border-radius: 2px;
+    margin-left: 4px;
 }
 
-.not-found {
+.not-found-msg {
     border-left: 3px solid #ff6b6b;
-    background: #1a1212;
+    padding-left: 12px;
+    color: #ff6b6b;
 }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ──────────────────────────────────────────────
-# API Helpers
+# Session state initialisation
 # ──────────────────────────────────────────────
 
-def api_health():
-    try:
-        r = requests.get(f"{API_URL}/health", timeout=3)
-        return r.json() if r.ok else None
-    except:
-        return None
+@st.cache_resource
+def get_vsm() -> VectorStoreManager:
+    """
+    Initialise VectorStoreManager once per Streamlit session.
+    Cached so the FAISS index is not reloaded on every rerun.
+    """
+    config = RAGConfig()
+    vsm = VectorStoreManager(config)
+    vsm.load_or_create()
+    return vsm
 
-def api_upload(file_bytes, filename):
-    r = requests.post(
-        f"{API_URL}/upload",
-        files={"file": (filename, file_bytes)},
-        timeout=60,
+
+def get_config() -> RAGConfig:
+    """Build RAGConfig from current sidebar slider values."""
+    return RAGConfig(
+        top_k=st.session_state.get("top_k", 5),
+        rerank_top_n=st.session_state.get("rerank_top_n", 3),
+        score_threshold=st.session_state.get("score_threshold", 0.30),
     )
-    return r.json() if r.ok else {"error": r.text}
 
-def api_query(question, top_k=5, threshold=0.30):
-    r = requests.post(
-        f"{API_URL}/query",
-        json={"question": question, "top_k": top_k, "score_threshold": threshold},
-        timeout=30,
-    )
-    return r.json() if r.ok else {"error": r.text}
 
-def api_list_docs():
-    r = requests.get(f"{API_URL}/documents", timeout=5)
-    return r.json() if r.ok else {"documents": []}
-
-def api_clear():
-    r = requests.delete(f"{API_URL}/documents", timeout=10)
-    return r.ok
+if "history" not in st.session_state:
+    st.session_state.history = []
 
 
 # ──────────────────────────────────────────────
@@ -127,59 +132,98 @@ with st.sidebar:
     st.markdown("*Document Q&A with citations*")
     st.divider()
 
-    # Health
-    health = api_health()
-    if health:
-        st.success(f"API connected · {health['indexed_documents']} docs indexed")
-    else:
-        st.error("⚠️ API offline — start the FastAPI backend")
+    # API key check
+    if not os.environ.get("OPENAI_API_KEY"):
+        st.error("⚠️ OPENAI_API_KEY not set.\nAdd it to `.env` or Streamlit Cloud secrets.")
+        st.stop()
+
+    vsm = get_vsm()
+    doc_count = vsm.document_count()
+    st.success(f"Ready · {doc_count} document{'s' if doc_count != 1 else ''} indexed")
 
     st.divider()
 
-    # Upload
+    # ── Upload ──
     st.markdown("### Upload Documents")
-    uploaded = st.file_uploader(
+    uploaded_files = st.file_uploader(
         "Drop files here",
         type=SUPPORTED_TYPES,
         accept_multiple_files=True,
         label_visibility="collapsed",
     )
 
-    if uploaded:
-        for f in uploaded:
-            if st.button(f"Index: {f.name}", key=f"btn_{f.name}"):
-                with st.spinner(f"Indexing {f.name}..."):
-                    result = api_upload(f.getvalue(), f.name)
-                if "error" in result:
-                    st.error(result["error"])
-                elif result.get("already_indexed"):
-                    st.info(result["message"])
-                else:
-                    st.success(f"✓ {result['chunks_created']} chunks indexed")
+    if uploaded_files:
+        for uploaded_file in uploaded_files:
+            btn_label = f"Index: {uploaded_file.name}"
+            if st.button(btn_label, key=f"btn_{uploaded_file.name}"):
+                with st.spinner(f"Indexing {uploaded_file.name}..."):
+                    # Write to temp file so loaders can open it by path
+                    suffix = Path(uploaded_file.name).suffix
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                        tmp.write(uploaded_file.getvalue())
+                        tmp_path = tmp.name
+
+                    try:
+                        docs = load_document(tmp_path)
+                        file_hash = docs[0].metadata.get("file_hash", "")
+
+                        if vsm.is_indexed(file_hash):
+                            st.info(f"'{uploaded_file.name}' is already indexed.")
+                        else:
+                            # Fix source name (tmp path → original filename)
+                            for doc in docs:
+                                doc.metadata["source_file"] = uploaded_file.name
+
+                            chunks = chunk_documents(docs, get_config())
+                            vsm.add_documents(chunks, uploaded_file.name, file_hash)
+                            st.success(f"✓ {len(chunks)} chunks indexed")
+                            st.rerun()
+
+                    except Exception as e:
+                        st.error(f"Failed: {e}")
+                    finally:
+                        os.unlink(tmp_path)
 
     st.divider()
 
-    # Settings
+    # ── Retrieval settings ──
     st.markdown("### Retrieval Settings")
-    top_k = st.slider("Top-K chunks", 1, 10, 5)
-    threshold = st.slider("Min similarity score", 0.0, 1.0, 0.30, 0.05)
+    st.session_state["top_k"] = st.slider("Top-K candidates (FAISS)", 1, 10, 5)
+    st.session_state["rerank_top_n"] = st.slider("Top-N after reranking", 1, 5, 3)
+    st.session_state["score_threshold"] = st.slider("Min similarity score", 0.0, 1.0, 0.30, 0.05)
+
+    filter_file = None
+    indexed = vsm.get_indexed_files()
+    if len(indexed) > 1:
+        st.divider()
+        st.markdown("### Filter by document")
+        file_names = ["All documents"] + [d["file"] for d in indexed]
+        selected = st.selectbox("Search within", file_names, label_visibility="collapsed")
+        if selected != "All documents":
+            filter_file = selected
 
     st.divider()
 
-    # Indexed docs
+    # ── Indexed documents ──
     st.markdown("### Indexed Documents")
-    docs_data = api_list_docs()
-    docs = docs_data.get("documents", [])
-    if docs:
-        for d in docs:
-            st.markdown(f"📄 `{d['file']}` — {d['chunks']} chunks")
+    if indexed:
+        for d in indexed:
+            icon = "📊" if d.get("file_type") == "csv" else "📄"
+            st.markdown(f"{icon} `{d['file']}` — {d['chunks']} chunks")
     else:
         st.caption("No documents indexed yet.")
 
-    if docs and st.button("🗑️ Clear all documents", type="secondary"):
-        if api_clear():
-            st.success("Index cleared.")
-            st.rerun()
+    if indexed and st.button("🗑️ Clear all documents", type="secondary"):
+        import shutil
+        index_dir = Path(vsm.config.index_dir)
+        meta_path = Path(vsm.config.metadata_path)
+        if index_dir.exists():
+            shutil.rmtree(index_dir)
+        if meta_path.exists():
+            meta_path.unlink()
+        st.cache_resource.clear()
+        st.success("Index cleared.")
+        st.rerun()
 
 
 # ──────────────────────────────────────────────
@@ -187,50 +231,69 @@ with st.sidebar:
 # ──────────────────────────────────────────────
 
 st.markdown("# Document Q&A Assistant")
-st.markdown("Ask questions about your uploaded documents. Every answer includes source citations and similarity scores.")
+st.markdown(
+    "Upload documents in the sidebar, then ask questions. "
+    "Every answer includes source citations with similarity and rerank scores."
+)
 st.divider()
 
-# Chat history
-if "history" not in st.session_state:
-    st.session_state.history = []
-
-# Input
 question = st.chat_input("Ask a question about your documents...")
 
 if question:
-    with st.spinner("Searching documents and generating answer..."):
-        result = api_query(question, top_k=top_k, threshold=threshold)
-
-    if "error" in result:
-        st.error(result["error"])
+    if vsm.vectorstore is None:
+        st.warning("No documents indexed yet. Upload a document first.")
     else:
+        with st.spinner("Retrieving · reranking · generating..."):
+            result = query(
+                question=question,
+                vectorstore=vsm.vectorstore,
+                config=get_config(),
+                filter_file=filter_file,
+            )
         st.session_state.history.append(result)
 
-# Display history (newest first)
+# ── Chat history ──
 for entry in reversed(st.session_state.history):
     with st.chat_message("user"):
-        st.write(entry["question"])
+        st.write(entry.question)
 
     with st.chat_message("assistant"):
-        found = entry.get("found_in_docs", True)
-        css_class = "answer-box" if found else "answer-box not-found"
-        st.markdown(f'<div class="{css_class}">{entry["answer"]}</div>', unsafe_allow_html=True)
+        if not entry.found_in_docs:
+            st.markdown(
+                f'<div class="not-found-msg">{entry.answer}</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(entry.answer)
 
-        sources = entry.get("sources", [])
-        if sources:
-            with st.expander(f"📎 {len(sources)} source chunk(s) cited", expanded=True):
-                for s in sources:
-                    score = s.get("similarity_score")
-                    score_html = f'<span class="score-badge">score: {score:.3f}</span>' if score else ""
-                    page_info = f" · page {s['page']}" if s.get("page") is not None else ""
+        if entry.sources:
+            reranked_label = " · reranked ✓" if entry.reranked else ""
+            with st.expander(
+                f"📎 {len(entry.sources)} source chunk(s) cited{reranked_label}",
+                expanded=True,
+            ):
+                for s in entry.sources:
+                    cos_html = (
+                        f'<span class="score-badge">cosine: {s.similarity_score:.3f}</span>'
+                        if s.similarity_score is not None else ""
+                    )
+                    rerank_html = (
+                        f'<span class="rerank-badge">rerank: {s.rerank_score:.2f}</span>'
+                        if s.rerank_score is not None else ""
+                    )
+                    page_info = f" · page {s.page}" if s.page is not None else ""
+                    excerpt = s.excerpt + ("..." if len(s.excerpt) >= 300 else "")
+
                     st.markdown(
                         f"""<div class="source-card">
-                        <strong>{s['file']}</strong>{page_info} · chunk #{s['chunk_index']}{score_html}
-                        <br><br>{s['excerpt']}{"..." if len(s['excerpt']) >= 300 else ""}
+                        <strong>{s.file}</strong>{page_info} · chunk #{s.chunk_index}
+                        {cos_html}{rerank_html}
+                        <br><br>{excerpt}
                         </div>""",
                         unsafe_allow_html=True,
                     )
-        elif found:
-            st.caption("No source chunks returned above threshold.")
 
-        st.caption(f"Model: `{entry.get('model_used', 'gpt-4o-mini')}`")
+        meta_parts = [f"`{entry.model_used}`"]
+        if entry.reranked:
+            meta_parts.append("cross-encoder reranked")
+        st.caption(" · ".join(meta_parts))
