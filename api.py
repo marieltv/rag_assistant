@@ -8,7 +8,8 @@ Endpoints:
   DELETE /documents   - Clear the index
   GET  /health        - Health check
 """
-
+from dotenv import load_dotenv
+load_dotenv()
 import os
 import shutil
 import tempfile
