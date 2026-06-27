@@ -8,7 +8,7 @@ import os
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 from rag_pipeline import (
     RAGConfig,
@@ -236,15 +236,16 @@ def test_reorder_empty_list():
 # ──────────────────────────────────────────────
 
 def test_rerank_empty_candidates():
-    assert rerank("question", [], top_n=3) == []
+    assert rerank("question", [], top_n=3) == ([], False)
 
 
 def test_rerank_fallback_without_sentence_transformers():
     docs = [(make_doc(f"doc{i}"), float(i) * 0.1) for i in range(5)]
     with patch.dict("sys.modules", {"sentence_transformers": None}):
-        result = rerank("question", docs, top_n=3)
+        result, used_ce = rerank("question", docs, top_n=3)
     assert len(result) == 3
     assert result[0][0].page_content == "doc0"
+    assert used_ce is False
 
 
 def test_rerank_with_mock_cross_encoder():
@@ -260,10 +261,11 @@ def test_rerank_with_mock_cross_encoder():
     mock_module.CrossEncoder.return_value = mock_ce
 
     with patch.dict("sys.modules", {"sentence_transformers": mock_module}):
-        result = rerank("What is the answer?", docs, top_n=2)
+        result, used_ce = rerank("What is the answer?", docs, top_n=2)
 
     assert len(result) == 2
     assert result[0][0].page_content == "directly answers the question"
+    assert used_ce is True
 
 
 # ──────────────────────────────────────────────
@@ -388,7 +390,7 @@ def test_query_metadata_filter():
     mock_llm_instance = MagicMock()
     mock_llm_instance.invoke.return_value.content = "Answer from A only."
 
-    with patch("rag_pipeline.rerank", return_value=[(doc_a, 0.85)]), \
+    with patch("rag_pipeline.rerank", return_value=([(doc_a, 0.85)], True)), \
          patch("rag_pipeline.ChatOpenAI", return_value=mock_llm_instance), \
          patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
         result = query(
@@ -415,46 +417,21 @@ def test_query_returns_both_scores():
     mock_llm_instance = MagicMock()
     mock_llm_instance.invoke.return_value.content = "CET1 minimum is 4.5%."
 
-    with patch("rag_pipeline.rerank", return_value=[(doc, 12.5)]), \
+    with patch("rag_pipeline.rerank", return_value=([(doc, 12.5)], True)), \
          patch("rag_pipeline.ChatOpenAI", return_value=mock_llm_instance), \
          patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
         result = query("What is CET1?", vectorstore=mock_vs, config=RAGConfig(score_threshold=0.30))
 
     assert result.found_in_docs
+    assert result.reranked is True
     assert result.sources[0].similarity_score == 0.87
     assert result.sources[0].rerank_score == 12.5
 
-    with patch("rag_pipeline.rerank", return_value=[(doc_a, 0.85)]):
-        with patch("rag_pipeline.ChatOpenAI", return_value=mock_llm_instance):
-            result = query(
-                "question",
-                vectorstore=mock_vs,
-                config=RAGConfig(score_threshold=0.30),
-                filter_file="a.pdf",
-            )
 
-    assert all(s.file == "a.pdf" for s in result.sources)
+def test_load_document_empty_file_raises(tmp_path):
+    from rag_pipeline import load_document
 
-
-def test_query_returns_both_scores():
-    """RAGAnswer sources should carry both similarity and rerank scores."""
-    from rag_pipeline import query
-
-    doc = Document(
-        page_content="Basel III requires CET1 of 4.5%.",
-        metadata={"source_file": "basel.pdf", "page": 2, "chunk_index": 3},
-    )
-    mock_vs = MagicMock()
-    mock_vs.similarity_search_with_relevance_scores.return_value = [(doc, 0.87)]
-
-    mock_llm_instance = MagicMock()
-    mock_llm_instance.invoke.return_value.content = "CET1 minimum is 4.5%."
-
-    with patch("rag_pipeline.rerank", return_value=[(doc, 12.5)]), \
-         patch("rag_pipeline.ChatOpenAI", return_value=mock_llm_instance), \
-         patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
-        result = query("What is CET1?", vectorstore=mock_vs, config=RAGConfig(score_threshold=0.30))
-
-    assert result.found_in_docs
-    assert result.sources[0].similarity_score == 0.87
-    assert result.sources[0].rerank_score == 12.5
+    f = tmp_path / "empty.txt"
+    f.write_text("")
+    with pytest.raises(ValueError, match="No content could be extracted"):
+        load_document(str(f))

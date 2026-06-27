@@ -30,7 +30,7 @@ from rag_pipeline import (
 # Page config
 # ──────────────────────────────────────────────
 
-SUPPORTED_TYPES = ["pdf", "docx", "doc", "csv", "txt", "md"]
+SUPPORTED_TYPES = ["pdf", "docx", "csv", "txt", "md"]
 
 st.set_page_config(
     page_title="DocMind — Document Q&A",
@@ -48,6 +48,12 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
 
 html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
+
+.upload-list {
+    font-size: 0.85rem;
+    color: #ccc;
+    margin: 4px 0 8px 0;
+}
 
 .source-card {
     background: #1a1a2e;
@@ -119,8 +125,44 @@ def get_config() -> RAGConfig:
     )
 
 
+def index_file_bytes(
+    filename: str,
+    file_bytes: bytes,
+    vsm: VectorStoreManager,
+) -> tuple[bool, str]:
+    """
+    Write uploaded bytes to a temp file, load, chunk, and index.
+
+    Returns:
+        (success, message) — success is True when indexed or already present.
+    """
+    suffix = Path(filename).suffix
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+
+    try:
+        docs = load_document(tmp_path)
+        file_hash = docs[0].metadata.get("file_hash", "")
+
+        if vsm.is_indexed(file_hash):
+            return True, f"'{filename}' is already indexed."
+
+        for doc in docs:
+            doc.metadata["source_file"] = filename
+
+        chunks = chunk_documents(docs, get_config())
+        vsm.add_documents(chunks, filename, file_hash)
+        return True, f"✓ {filename}: {len(chunks)} chunks indexed"
+    finally:
+        os.unlink(tmp_path)
+
+
 if "history" not in st.session_state:
     st.session_state.history = []
+
+if "pending_uploads" not in st.session_state:
+    st.session_state.pending_uploads: dict[str, bytes] = {}
 
 
 # ──────────────────────────────────────────────
@@ -145,44 +187,62 @@ with st.sidebar:
 
     # ── Upload ──
     st.markdown("### Upload Documents")
+    st.caption("Supported: PDF, DOCX, CSV, TXT, MD")
+
     uploaded_files = st.file_uploader(
-        "Drop files here",
+        "Drop PDF, DOCX, CSV, TXT, or MD files here",
         type=SUPPORTED_TYPES,
         accept_multiple_files=True,
-        label_visibility="collapsed",
+        key="document_uploader",
     )
 
     if uploaded_files:
         for uploaded_file in uploaded_files:
-            btn_label = f"Index: {uploaded_file.name}"
-            if st.button(btn_label, key=f"btn_{uploaded_file.name}"):
-                with st.spinner(f"Indexing {uploaded_file.name}..."):
-                    # Write to temp file so loaders can open it by path
-                    suffix = Path(uploaded_file.name).suffix
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                        tmp.write(uploaded_file.getvalue())
-                        tmp_path = tmp.name
+            st.session_state.pending_uploads[uploaded_file.name] = uploaded_file.getvalue()
 
+    if st.session_state.pending_uploads:
+        st.markdown("**Selected files:**")
+        for name, data in st.session_state.pending_uploads.items():
+            size_kb = max(len(data) // 1024, 1)
+            st.markdown(f'<p class="upload-list">📎 {name} ({size_kb} KB)</p>', unsafe_allow_html=True)
+
+        btn_col, clear_col = st.columns(2)
+        with btn_col:
+            index_all = st.button("Index all", type="primary", key="index_all")
+        with clear_col:
+            clear_selection = st.button("Clear", key="clear_uploads")
+
+        if clear_selection:
+            st.session_state.pending_uploads.clear()
+            st.rerun()
+
+        if index_all:
+            messages: list[str] = []
+            errors: list[str] = []
+            indexed_names: list[str] = []
+
+            with st.spinner("Indexing selected files..."):
+                for name, data in list(st.session_state.pending_uploads.items()):
                     try:
-                        docs = load_document(tmp_path)
-                        file_hash = docs[0].metadata.get("file_hash", "")
-
-                        if vsm.is_indexed(file_hash):
-                            st.info(f"'{uploaded_file.name}' is already indexed.")
+                        ok, msg = index_file_bytes(name, data, vsm)
+                        if ok:
+                            messages.append(msg)
+                            indexed_names.append(name)
                         else:
-                            # Fix source name (tmp path → original filename)
-                            for doc in docs:
-                                doc.metadata["source_file"] = uploaded_file.name
-
-                            chunks = chunk_documents(docs, get_config())
-                            vsm.add_documents(chunks, uploaded_file.name, file_hash)
-                            st.success(f"✓ {len(chunks)} chunks indexed")
-                            st.rerun()
-
+                            errors.append(msg)
                     except Exception as e:
-                        st.error(f"Failed: {e}")
-                    finally:
-                        os.unlink(tmp_path)
+                        errors.append(f"{name}: {e}")
+
+            for name in indexed_names:
+                st.session_state.pending_uploads.pop(name, None)
+
+            for msg in messages:
+                st.success(msg) if "✓" in msg else st.info(msg)
+            for err in errors:
+                st.error(err)
+
+            if indexed_names:
+                st.rerun()
 
     st.divider()
 
@@ -222,6 +282,7 @@ with st.sidebar:
         if meta_path.exists():
             meta_path.unlink()
         st.cache_resource.clear()
+        st.session_state.pending_uploads.clear()
         st.success("Index cleared.")
         st.rerun()
 

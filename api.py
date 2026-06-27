@@ -8,6 +8,7 @@ Endpoints:
   DELETE /documents   - Clear the index
   GET  /health        - Health check
 """
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 load_dotenv()
 import os
@@ -16,7 +17,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from loguru import logger
@@ -28,7 +29,6 @@ from rag_pipeline import (
     chunk_documents,
     query,
     RAGAnswer,
-    SourceChunk,
 )
 
 
@@ -36,10 +36,22 @@ from rag_pipeline import (
 # App & Config
 # ──────────────────────────────────────────────
 
+config = RAGConfig()
+vsm = VectorStoreManager(config)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    vsm.load_or_create()
+    logger.info("RAG API started. Indexed files: {}", vsm.document_count())
+    yield
+
+
 app = FastAPI(
     title="Document Q&A RAG Assistant",
     description="Upload documents, ask questions, get cited answers.",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -49,15 +61,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-config = RAGConfig()
-vsm = VectorStoreManager(config)
-
-# Load existing index on startup
-@app.on_event("startup")
-def startup():
-    vsm.load_or_create()
-    logger.info("RAG API started. Indexed files: {}", vsm.document_count())
-
 
 # ──────────────────────────────────────────────
 # Schemas
@@ -66,6 +69,7 @@ def startup():
 class QueryRequest(BaseModel):
     question: str
     top_k: Optional[int] = None
+    rerank_top_n: Optional[int] = None
     score_threshold: Optional[float] = None
     filter_file: Optional[str] = None     # restrict retrieval to a single source file
 
@@ -117,7 +121,7 @@ def health():
 @app.post("/upload", response_model=UploadResponse)
 async def upload_document(file: UploadFile = File(...)):
     """Upload a PDF, DOCX, CSV, or TXT file and index it."""
-    allowed_extensions = {".pdf", ".docx", ".doc", ".csv", ".txt", ".md"}
+    allowed_extensions = {".pdf", ".docx", ".csv", ".txt", ".md"}
     ext = Path(file.filename).suffix.lower()
 
     if ext not in allowed_extensions:
@@ -133,10 +137,8 @@ async def upload_document(file: UploadFile = File(...)):
         tmp_path = tmp.name
 
     try:
-        # Load
         docs = load_document(tmp_path)
 
-        # Check deduplication
         file_hash = docs[0].metadata.get("file_hash", "")
         if vsm.is_indexed(file_hash):
             return UploadResponse(
@@ -146,14 +148,10 @@ async def upload_document(file: UploadFile = File(...)):
                 message=f"'{file.filename}' was already indexed. No changes made.",
             )
 
-        # Fix source file name (tmp path → original name)
         for doc in docs:
             doc.metadata["source_file"] = file.filename
 
-        # Chunk
         chunks = chunk_documents(docs, config)
-
-        # Embed & store
         vsm.add_documents(chunks, file.filename, file_hash)
 
         return UploadResponse(
@@ -163,6 +161,8 @@ async def upload_document(file: UploadFile = File(...)):
             message=f"Successfully indexed '{file.filename}' into {len(chunks)} chunks.",
         )
 
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Upload failed for {file.filename}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -177,9 +177,9 @@ def ask_question(req: QueryRequest):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
-    # Allow per-request overrides
     local_config = RAGConfig(
         top_k=req.top_k or config.top_k,
+        rerank_top_n=req.rerank_top_n or config.rerank_top_n,
         score_threshold=req.score_threshold or config.score_threshold,
         llm_model=config.llm_model,
         embedding_model=config.embedding_model,

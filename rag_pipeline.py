@@ -15,7 +15,7 @@ from typing import Optional
 from dataclasses import dataclass, field
 
 from loguru import logger
-from langchain.schema import Document
+from langchain_core.documents import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import (
@@ -60,7 +60,7 @@ class RAGConfig:
 # Document Loaders
 # ──────────────────────────────────────────────
 
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".doc", ".csv", ".txt", ".md"}
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".csv", ".txt", ".md"}
 
 
 def load_document(file_path: str) -> list[Document]:
@@ -86,7 +86,7 @@ def load_document(file_path: str) -> list[Document]:
     try:
         if ext == ".pdf":
             docs = PyPDFLoader(file_path).load()
-        elif ext in (".docx", ".doc"):
+        elif ext == ".docx":
             docs = Docx2txtLoader(file_path).load()
         elif ext == ".csv":
             # CSVs are NOT character-chunked. _load_csv returns one Document
@@ -102,6 +102,12 @@ def load_document(file_path: str) -> list[Document]:
                 "file_type": ext.lstrip("."),
                 "file_hash": file_hash,
             })
+
+        if not docs or not any(doc.page_content.strip() for doc in docs):
+            raise ValueError(
+                f"No content could be extracted from '{path.name}'. "
+                "The file may be empty or unreadable."
+            )
 
         logger.info(f"Loaded {len(docs)} section(s) from {path.name}")
         return docs
@@ -309,11 +315,23 @@ class VectorStoreManager:
 # Reranker
 # ──────────────────────────────────────────────
 
+_cross_encoder = None
+
+
+def _get_cross_encoder():
+    """Load the cross-encoder once and reuse across queries."""
+    global _cross_encoder
+    if _cross_encoder is None:
+        from sentence_transformers import CrossEncoder
+        _cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+    return _cross_encoder
+
+
 def rerank(
     question: str,
     candidates: list[tuple[Document, float]],
     top_n: int,
-) -> list[tuple[Document, float]]:
+) -> tuple[list[tuple[Document, float]], bool]:
     """
     Cross-encoder reranking of FAISS candidates.
 
@@ -329,11 +347,10 @@ def rerank(
     installed, so lightweight environments work without modification.
     """
     if not candidates:
-        return []
+        return [], False
 
     try:
-        from sentence_transformers import CrossEncoder
-        model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        model = _get_cross_encoder()
         pairs = [(question, doc.page_content) for doc, _ in candidates]
         ce_scores = model.predict(pairs)
 
@@ -342,14 +359,14 @@ def rerank(
             key=lambda x: x[1],
             reverse=True,
         )
-        return [(doc, float(score)) for doc, score in reranked[:top_n]]
+        return [(doc, float(score)) for doc, score in reranked[:top_n]], True
 
-    except ImportError:
+    except (ImportError, OSError):
         logger.warning(
             "sentence-transformers not installed — skipping cross-encoder reranking. "
             "pip install sentence-transformers to enable."
         )
-        return candidates[:top_n]
+        return candidates[:top_n], False
 
 
 # ──────────────────────────────────────────────
@@ -501,8 +518,7 @@ def query(
 
     # Step 4 — Rerank
     cosine_scores = {id(doc): score for doc, score in relevant}
-    reranked = rerank(question, relevant, top_n=config.rerank_top_n)
-    reranked_flag = len(relevant) > 1
+    reranked, reranked_flag = rerank(question, relevant, top_n=config.rerank_top_n)
 
     # Step 5 — Lost-in-the-middle reordering
     reranked_docs_ordered = reorder_for_lost_in_middle([doc for doc, _ in reranked])

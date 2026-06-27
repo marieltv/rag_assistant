@@ -10,7 +10,7 @@ End-to-end Retrieval-Augmented Generation (RAG) system for document question ans
 ┌─────────────────────────────────────────────────────────────┐
 │                     INGESTION PIPELINE                      │
 │                                                             │
-│  Upload (PDF / DOCX / CSV / TXT)                            │
+│  Upload (PDF / DOCX / CSV / TXT / MD)                            │
 │       ↓                                                     │
 │  Format-aware loader                                        │
 │    PDF  → PyPDFLoader (page-aware)                         │
@@ -61,8 +61,8 @@ End-to-end Retrieval-Augmented Generation (RAG) system for document question ans
 | Vector store | FAISS | Local, persisted. ChromaDB drop-in available |
 | Reranker | cross-encoder/ms-marco-MiniLM-L-6-v2 | CPU-friendly, ~80MB. Graceful fallback if missing |
 | RAG framework | LangChain | |
-| Backend API | FastAPI |FastAPI backend available for production deployment behind a reverse proxy or on a separate service |
-| Frontend | Streamlit | |
+| Frontend | Streamlit | Standalone UI (`app.py`) — calls pipeline directly |
+| Backend API | FastAPI | Optional production API (`api.py`) |
 | Testing | pytest | 30 unit tests, no API key required |
 
 ---
@@ -94,14 +94,31 @@ pip install -r requirements.txt
 copy .env.example .env
 # Edit .env and set OPENAI_API_KEY
 
-# 3. Start backend
-uvicorn api:app --reload --port 8000
-
-# 4. Start frontend (new terminal)
+# 3. Start the Streamlit UI (recommended for local use)
 streamlit run app.py
 
-# 5. Run tests
+# Optional: start FastAPI backend (separate terminal)
+uvicorn api:app --reload --port 8000
+
+# 4. Run tests
 pytest tests/ -v
+```
+
+---
+
+## Uploading documents (Streamlit UI)
+
+1. Open the sidebar **Upload Documents** section.
+2. Browse or drag-and-drop supported files (PDF, DOCX, CSV, TXT, MD).
+3. Selected files appear in a **Selected files** list with file size.
+4. Click **Index all** to embed and store them in the FAISS index.
+
+Legacy `.doc` (Word 97–2003) is not supported — save as `.docx` first.
+
+If uploads fail silently in a dev container or behind a proxy, try:
+
+```bash
+streamlit run app.py --server.enableXsrfProtection false
 ```
 
 ---
@@ -148,6 +165,7 @@ When multiple documents are indexed, queries can be scoped to a single source fi
 {
   "question": "What is the minimum CET1 ratio?",
   "top_k": 5,
+  "rerank_top_n": 3,
   "score_threshold": 0.30,
   "filter_file": "basel_iii_framework.pdf"
 }
