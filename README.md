@@ -1,6 +1,8 @@
 # Document Q&A RAG Assistant
 
-End-to-end Retrieval-Augmented Generation (RAG) system for document question answering with source citations, similarity scores, and cross-encoder reranking.
+End-to-end Retrieval-Augmented Generation (RAG) system for document question answering with **hybrid BM25 + vector search**, source citations, and cross-encoder reranking.
+
+Inspired by [jamwithai/beginner-local-rag-system](https://github.com/jamwithai/beginner-local-rag-system) (hybrid retrieval + local embeddings), with a custom Streamlit UI.
 
 ---
 
@@ -10,21 +12,16 @@ End-to-end Retrieval-Augmented Generation (RAG) system for document question ans
 ┌─────────────────────────────────────────────────────────────┐
 │                     INGESTION PIPELINE                      │
 │                                                             │
-│  Upload (PDF / DOCX / CSV / TXT / MD)                            │
+│  Upload (PDF / DOCX / CSV / TXT / MD)                       │
 │       ↓                                                     │
-│  Format-aware loader                                        │
-│    PDF  → PyPDFLoader (page-aware)                         │
-│    DOCX → Docx2txtLoader                                    │
-│    CSV  → row-level loader (col: val | col: val)            │
-│    TXT  → TextLoader                                        │
+│  Format-aware loader + text cleaning                        │
 │       ↓                                                     │
-│  Format-aware chunking                                      │
-│    Prose → RecursiveCharacterTextSplitter (800 chars)       │
-│    CSV   → row grouping (10 rows per chunk)                 │
+│  Word-based chunking (300 words, 100 overlap)               │
+│    CSV → row grouping (10 rows per chunk)                   │
 │       ↓                                                     │
-│  OpenAI Embeddings (text-embedding-3-small)                 │
+│  Local embeddings (all-mpnet-base-v2)                       │
 │       ↓                                                     │
-│  FAISS vector store (persisted to disk)                     │
+│  FAISS (cosine) + BM25 index (persisted to disk)            │
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
@@ -32,21 +29,15 @@ End-to-end Retrieval-Augmented Generation (RAG) system for document question ans
 │                                                             │
 │  User question                                              │
 │       ↓                                                     │
-│  FAISS similarity search → top_k candidates                 │
-│       ↓                                                     │
-│  Score threshold filter (cosine ≥ 0.30)                     │
+│  Hybrid search: BM25 (keywords) + FAISS (semantic)          │
+│    → merged via Reciprocal Rank Fusion (RRF)                │
 │       ↓                                                     │
 │  Optional metadata filter (by source filename)              │
 │       ↓                                                     │
-│  Cross-encoder reranking (ms-marco-MiniLM-L-6-v2)          │
+│  Cross-encoder reranking (ms-marco-MiniLM-L-6-v2)           │
 │    → top rerank_top_n chunks                                │
 │       ↓                                                     │
-│  Lost-in-the-middle reordering                              │
-│    → best evidence at prompt edges                          │
-│       ↓                                                     │
-│  GPT-4o-mini (stuffed context prompt)                       │
-│       ↓                                                     │
-│  Answer + citations (cosine score + rerank score)           │
+│  Lost-in-the-middle reordering → GPT-4o-mini → answer       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -56,14 +47,15 @@ End-to-end Retrieval-Augmented Generation (RAG) system for document question ans
 
 | Layer | Technology | Notes |
 |---|---|---|
-| LLM | GPT-4o-mini | Swappable to GPT-4o or local Ollama |
-| Embeddings | text-embedding-3-small | Must match model used at index time |
-| Vector store | FAISS | Local, persisted. ChromaDB drop-in available |
-| Reranker | cross-encoder/ms-marco-MiniLM-L-6-v2 | CPU-friendly, ~80MB. Graceful fallback if missing |
+| LLM | GPT-4o-mini | Answer generation (OpenAI API) |
+| Embeddings | all-mpnet-base-v2 (local) | Free, runs on CPU; switch to OpenAI via env |
+| Keyword search | BM25 (rank-bm25) | Catches exact terms embeddings miss |
+| Vector store | FAISS (cosine) | Local, persisted |
+| Reranker | cross-encoder/ms-marco-MiniLM-L-6-v2 | Joint question+chunk scoring |
 | RAG framework | LangChain | |
 | Frontend | Streamlit | Standalone UI (`app.py`) — calls pipeline directly |
 | Backend API | FastAPI | Optional production API (`api.py`) |
-| Testing | pytest | 30 unit tests, no API key required |
+| Testing | pytest | Unit tests, no API key required |
 
 ---
 
@@ -111,7 +103,9 @@ pytest tests/ -v
 1. Open the sidebar **Upload Documents** section.
 2. Browse or drag-and-drop supported files (PDF, DOCX, CSV, TXT, MD).
 3. Selected files appear in a **Selected files** list with file size.
-4. Click **Index all** to embed and store them in the FAISS index.
+4. Click **Index all** to embed and store them in the FAISS + BM25 index.
+
+**Important:** If you indexed documents before this hybrid redesign, click **Clear all documents** and re-upload. The new system uses local embeddings (`all-mpnet-base-v2`) instead of OpenAI embeddings.
 
 Legacy `.doc` (Word 97–2003) is not supported — save as `.docx` first.
 
@@ -125,25 +119,17 @@ streamlit run app.py --server.enableXsrfProtection false
 
 ## Key design decisions
 
-### Format-aware chunking
-Character-based chunking is the single most common mistake in beginner RAG projects. A 800-character chunk sliced across CSV rows destroys row semantics — the embedding for `"50000\n30000\nauto\nmortgage"` carries no useful signal.
+### Hybrid BM25 + vector search
+Pure embedding search misses exact keyword matches; pure keyword search misses paraphrases. Following the [jamwithai hybrid pattern](https://github.com/jamwithai/beginner-local-rag-system), we combine BM25 and FAISS results with Reciprocal Rank Fusion — no OpenSearch server required.
 
-This project applies different strategies per format:
-- **PDF/DOCX/TXT**: recursive character splitting with 150-character overlap, which preserves sentence boundaries and prevents answers being cut at chunk edges
-- **CSV**: rows are loaded individually as `"col: val | col: val"` strings (column names included for semantic context), then grouped into 10-row chunks before embedding
+### Local sentence-transformer embeddings
+`all-mpnet-base-v2` runs on CPU with no embedding API cost and typically gives better recall on articles and PDFs than small OpenAI embedding models for local document Q&A.
 
-### Cross-encoder reranking
-FAISS retrieves by cosine similarity between embeddings, which measures topical overlap but not answer relevance. A query like "what is the default rate for SMEs?" can surface chunks that mention SMEs and default rates separately, without either chunk containing the answer.
+### No pre-filter threshold by default
+Similarity scores from FAISS vary widely by content type. The default threshold is **0 (disabled)** — top hybrid results always reach the cross-encoder reranker and LLM. Raise the threshold in the sidebar only if you need strict filtering.
 
-A cross-encoder scores `(question, chunk)` pairs jointly, after seeing both together. This catches false positives that embedding similarity misses. The pipeline fetches `top_k=5` candidates from FAISS, then reranks to `rerank_top_n=3` before passing to the LLM.
-
-Falls back gracefully to FAISS order if `sentence-transformers` is not installed.
-
-### Lost-in-the-middle mitigation
-LLMs attend most strongly to context at the beginning and end of their input (Liu et al., 2023). After reranking, chunks are reordered so the highest-scoring evidence appears first and last, with lower-scoring chunks in the middle.
-
-### Metadata filtering
-When multiple documents are indexed, queries can be scoped to a single source file via the `filter_file` parameter. This prevents low-relevance chunks from unrelated documents polluting the context.
+### Word-based chunking (300 / 100)
+Matches the reference repo: 300-word chunks with 100-word overlap preserve sentence semantics better than arbitrary character splits for news articles and reports.
 
 ---
 

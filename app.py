@@ -110,7 +110,7 @@ def get_vsm() -> VectorStoreManager:
     Initialise VectorStoreManager once per Streamlit session.
     Cached so the FAISS index is not reloaded on every rerun.
     """
-    config = RAGConfig()
+    config = RAGConfig.from_env()
     vsm = VectorStoreManager(config)
     vsm.load_or_create()
     return vsm
@@ -118,10 +118,16 @@ def get_vsm() -> VectorStoreManager:
 
 def get_config() -> RAGConfig:
     """Build RAGConfig from current sidebar slider values."""
+    base = RAGConfig.from_env()
     return RAGConfig(
-        top_k=st.session_state.get("top_k", 5),
-        rerank_top_n=st.session_state.get("rerank_top_n", 3),
-        score_threshold=st.session_state.get("score_threshold", 0.30),
+        chunk_size=base.chunk_size,
+        chunk_overlap=base.chunk_overlap,
+        embedding_backend=base.embedding_backend,
+        embedding_model=base.embedding_model,
+        llm_model=base.llm_model,
+        top_k=st.session_state.get("top_k", 10),
+        rerank_top_n=st.session_state.get("rerank_top_n", 4),
+        score_threshold=st.session_state.get("score_threshold", 0.0),
     )
 
 
@@ -182,6 +188,12 @@ with st.sidebar:
     vsm = get_vsm()
     doc_count = vsm.document_count()
     st.success(f"Ready · {doc_count} document{'s' if doc_count != 1 else ''} indexed")
+
+    if vsm.needs_reindex():
+        st.warning(
+            "Index was built with an older embedding model. "
+            "Click **Clear all documents**, then re-upload your files."
+        )
 
     st.divider()
 
@@ -248,9 +260,12 @@ with st.sidebar:
 
     # ── Retrieval settings ──
     st.markdown("### Retrieval Settings")
-    st.session_state["top_k"] = st.slider("Top-K candidates (FAISS)", 1, 10, 5)
-    st.session_state["rerank_top_n"] = st.slider("Top-N after reranking", 1, 5, 3)
-    st.session_state["score_threshold"] = st.slider("Min similarity score", 0.0, 1.0, 0.30, 0.05)
+    st.caption("Hybrid BM25 + semantic search · threshold 0 = disabled")
+    st.session_state["top_k"] = st.slider("Top-K candidates (hybrid)", 3, 20, 10)
+    st.session_state["rerank_top_n"] = st.slider("Top-N after reranking", 1, 8, 4)
+    st.session_state["score_threshold"] = st.slider(
+        "Min similarity score (0 = off)", 0.0, 1.0, 0.0, 0.05
+    )
 
     filter_file = None
     indexed = vsm.get_indexed_files()
@@ -304,10 +319,10 @@ if question:
     if vsm.vectorstore is None:
         st.warning("No documents indexed yet. Upload a document first.")
     else:
-        with st.spinner("Retrieving · reranking · generating..."):
+        with st.spinner("Hybrid search · reranking · generating..."):
             result = query(
                 question=question,
-                vectorstore=vsm.vectorstore,
+                vsm=vsm,
                 config=get_config(),
                 filter_file=filter_file,
             )
@@ -328,14 +343,15 @@ for entry in reversed(st.session_state.history):
             st.markdown(entry.answer)
 
         if entry.sources:
+            hybrid_label = " · hybrid ✓" if entry.hybrid_search else ""
             reranked_label = " · reranked ✓" if entry.reranked else ""
             with st.expander(
-                f"📎 {len(entry.sources)} source chunk(s) cited{reranked_label}",
+                f"📎 {len(entry.sources)} source chunk(s) cited{hybrid_label}{reranked_label}",
                 expanded=True,
             ):
                 for s in entry.sources:
                     cos_html = (
-                        f'<span class="score-badge">cosine: {s.similarity_score:.3f}</span>'
+                        f'<span class="score-badge">retrieval: {s.similarity_score:.3f}</span>'
                         if s.similarity_score is not None else ""
                     )
                     rerank_html = (
@@ -355,6 +371,8 @@ for entry in reversed(st.session_state.history):
                     )
 
         meta_parts = [f"`{entry.model_used}`"]
+        if entry.hybrid_search:
+            meta_parts.append("hybrid BM25+vector")
         if entry.reranked:
             meta_parts.append("cross-encoder reranked")
         st.caption(" · ".join(meta_parts))

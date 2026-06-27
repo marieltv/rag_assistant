@@ -36,7 +36,7 @@ from rag_pipeline import (
 # App & Config
 # ──────────────────────────────────────────────
 
-config = RAGConfig()
+config = RAGConfig.from_env()
 vsm = VectorStoreManager(config)
 
 
@@ -187,7 +187,7 @@ def ask_question(req: QueryRequest):
 
     result: RAGAnswer = query(
         req.question,
-        vsm.vectorstore,
+        vsm,
         local_config,
         filter_file=req.filter_file,
     )
