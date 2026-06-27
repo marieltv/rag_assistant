@@ -2,8 +2,6 @@
 
 End-to-end Retrieval-Augmented Generation (RAG) system for document question answering with **hybrid BM25 + vector search**, source citations, and cross-encoder reranking.
 
-Inspired by [jamwithai/beginner-local-rag-system](https://github.com/jamwithai/beginner-local-rag-system) (hybrid retrieval + local embeddings), with a custom Streamlit UI.
-
 ---
 
 ## Architecture
@@ -120,7 +118,7 @@ streamlit run app.py --server.enableXsrfProtection false
 ## Key design decisions
 
 ### Hybrid BM25 + vector search
-Pure embedding search misses exact keyword matches; pure keyword search misses paraphrases. Following the [jamwithai hybrid pattern](https://github.com/jamwithai/beginner-local-rag-system), we combine BM25 and FAISS results with Reciprocal Rank Fusion — no OpenSearch server required.
+Pure embedding search misses exact keyword matches; pure keyword search misses paraphrases. We combine BM25 and FAISS results with Reciprocal Rank Fusion — no OpenSearch server required.
 
 ### Local sentence-transformer embeddings
 `all-mpnet-base-v2` runs on CPU with no embedding API cost and typically gives better recall on articles and PDFs than small OpenAI embedding models for local document Q&A.
