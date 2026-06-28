@@ -657,10 +657,14 @@ Instructions:
 - Cite the source labels you used, e.g. [Source 1], and mention filenames when useful.
 - Do not invent facts not present in the context.
 - If sources disagree, explain the disagreement and cite both sources.
-- - If the context is partially relevant, answer the supported part directly,
-  then add one sentence on what's missing. Do NOT use the phrase
-  "I couldn't find this in the uploaded documents" in this case — that exact
-  phrase is reserved for when the context has no relevant information at all.
+- If the context is partially relevant, answer the supported part directly,
+  then add one sentence on what's missing — but only if a specific part of
+  the question remains genuinely unanswered. If the context substantively
+  answers the question, stop after the answer. Do not add a caveat just
+  because a more exhaustive or textbook-style definition could exist
+  elsewhere. Do NOT use the phrase "I couldn't find this in the uploaded
+  documents" in this case — that exact phrase is reserved for when the
+  context has no relevant information at all.
 
 Answer:""",
 )
