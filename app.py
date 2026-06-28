@@ -221,6 +221,7 @@ with st.sidebar:
         btn_col, clear_col = st.columns(2)
         with btn_col:
             index_all = st.button("Index all", type="primary", key="index_all")
+            st.write("DEBUG index_all:", index_all)
         with clear_col:
             clear_selection = st.button("Clear", key="clear_uploads")
 
@@ -228,8 +229,9 @@ with st.sidebar:
             st.session_state.pending_uploads.clear()
             st.rerun()
 
-        if index_all:
-            messages: list[str] = []
+            if index_all:
+                st.write("DEBUG pending_uploads keys:", list(st.session_state.pending_uploads.keys()))
+                messages: list[str] = []
             errors: list[str] = []
             indexed_names: list[str] = []
 
@@ -237,6 +239,7 @@ with st.sidebar:
                 for name, data in list(st.session_state.pending_uploads.items()):
                     try:
                         ok, msg = index_file_bytes(name, data, vsm)
+                        st.write("DEBUG index_file_bytes:", ok, msg)
                         if ok:
                             messages.append(msg)
                             indexed_names.append(name)
