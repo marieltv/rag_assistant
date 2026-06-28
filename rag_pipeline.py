@@ -311,6 +311,28 @@ def _doc_key(doc: Document) -> str:
     )
 
 
+def _normalize_scores(
+    ranked: list[tuple[Document, float]],
+) -> list[tuple[Document, float]]:
+    """
+    Min-max normalize one ranked list's scores to [0, 1].
+
+    BM25 scores are unbounded (e.g. 0–15+) while FAISS relevance scores are
+    already roughly 0–1. Without this, fusing them directly meant the
+    "representative" score picked for a chunk (see reciprocal_rank_fusion)
+    could be a raw BM25 score in disguise — making the UI's similarity badge
+    and the score-threshold slider behave inconsistently depending on which
+    channel happened to win for a given chunk.
+    """
+    if not ranked:
+        return ranked
+    scores = [s for _, s in ranked]
+    lo, hi = min(scores), max(scores)
+    if hi - lo < 1e-9:
+        return [(doc, 1.0) for doc, _ in ranked]
+    return [(doc, (s - lo) / (hi - lo)) for doc, s in ranked]
+
+
 def reciprocal_rank_fusion(
     ranked_lists: list[list[tuple[Document, float]]],
     rrf_k: int = 60,
@@ -318,13 +340,18 @@ def reciprocal_rank_fusion(
     """
     Merge multiple ranked result lists with Reciprocal Rank Fusion.
     Same approach used in production hybrid search pipelines.
+
+    Each list is min-max normalized to [0, 1] first (see _normalize_scores)
+    so the reported score stays a meaningful, comparable "confidence" value
+    regardless of which retrieval channel surfaced a given chunk.
     """
     scores: dict[str, float] = {}
     docs_by_key: dict[str, Document] = {}
     raw_scores: dict[str, list[float]] = {}
 
     for ranked in ranked_lists:
-        for rank, (doc, score) in enumerate(ranked):
+        normalized = _normalize_scores(ranked)
+        for rank, (doc, score) in enumerate(normalized):
             key = _doc_key(doc)
             docs_by_key[key] = doc
             scores[key] = scores.get(key, 0.0) + 1.0 / (rrf_k + rank + 1)

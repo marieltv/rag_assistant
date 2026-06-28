@@ -221,7 +221,6 @@ with st.sidebar:
         btn_col, clear_col = st.columns(2)
         with btn_col:
             index_all = st.button("Index all", type="primary", key="index_all")
-            st.write("DEBUG index_all:", index_all)
         with clear_col:
             clear_selection = st.button("Clear", key="clear_uploads")
 
@@ -229,9 +228,8 @@ with st.sidebar:
             st.session_state.pending_uploads.clear()
             st.rerun()
 
-            if index_all:
-                st.write("DEBUG pending_uploads keys:", list(st.session_state.pending_uploads.keys()))
-                messages: list[str] = []
+        if index_all:
+            messages: list[str] = []
             errors: list[str] = []
             indexed_names: list[str] = []
 
@@ -239,7 +237,6 @@ with st.sidebar:
                 for name, data in list(st.session_state.pending_uploads.items()):
                     try:
                         ok, msg = index_file_bytes(name, data, vsm)
-                        st.write("DEBUG index_file_bytes:", ok, msg)
                         if ok:
                             messages.append(msg)
                             indexed_names.append(name)
@@ -262,13 +259,13 @@ with st.sidebar:
     st.divider()
 
     # ── Retrieval settings ──
-    st.markdown("### Retrieval Settings")
-    st.caption("Hybrid BM25 + semantic search · threshold 0 = disabled")
-    st.session_state["top_k"] = st.slider("Top-K candidates (hybrid)", 3, 20, 10)
-    st.session_state["rerank_top_n"] = st.slider("Top-N after reranking", 1, 8, 4)
-    st.session_state["score_threshold"] = st.slider(
-        "Min similarity score (0 = off)", 0.0, 1.0, 0.0, 0.05
-    )
+    with st.expander("⚙️ Advanced retrieval settings"):
+        st.caption("Hybrid BM25 + semantic search · threshold 0 = disabled")
+        st.session_state["top_k"] = st.slider("Top-K candidates (hybrid)", 3, 20, 10)
+        st.session_state["rerank_top_n"] = st.slider("Top-N after reranking", 1, 8, 4)
+        st.session_state["score_threshold"] = st.slider(
+            "Min similarity score (0 = off)", 0.0, 1.0, 0.0, 0.05
+        )
 
     filter_file = None
     indexed = vsm.get_indexed_files()
