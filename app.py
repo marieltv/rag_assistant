@@ -168,7 +168,7 @@ if "history" not in st.session_state:
     st.session_state.history = []
 
 if "pending_uploads" not in st.session_state:
-    st.session_state.pending_uploads: dict[str, bytes] = {}
+    st.session_state.pending_uploads = {}
 
 
 # ──────────────────────────────────────────────
