@@ -103,7 +103,6 @@ pytest tests/ -v
 3. Selected files appear in a **Selected files** list with file size.
 4. Click **Index all** to embed and store them in the FAISS + BM25 index.
 
-**Important:** If you indexed documents before this hybrid redesign, click **Clear all documents** and re-upload. The new system uses local embeddings (`all-mpnet-base-v2`) instead of OpenAI embeddings.
 
 Legacy `.doc` (Word 97–2003) is not supported — save as `.docx` first.
 

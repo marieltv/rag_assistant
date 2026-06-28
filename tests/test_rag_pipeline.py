@@ -36,8 +36,8 @@ def test_default_config():
     assert cfg.chunk_size == 300
     assert cfg.chunk_overlap == 100
     assert cfg.csv_rows_per_chunk == 10
-    assert cfg.top_k == 10
-    assert cfg.rerank_top_n == 4
+    assert cfg.top_k == 12
+    assert cfg.rerank_top_n == 6
     assert cfg.score_threshold == 0.0
     assert cfg.embedding_backend == "local"
     assert cfg.llm_model == "gpt-4o-mini"

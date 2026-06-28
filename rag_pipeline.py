@@ -1,8 +1,7 @@
 """
 Core RAG Pipeline
 -----------------
-Hybrid retrieval (BM25 + dense vectors) inspired by:
-https://github.com/jamwithai/beginner-local-rag-system
+Hybrid retrieval (BM25 + dense vectors) 
 
 Pipeline: load → clean → chunk → embed → index → hybrid retrieve → rerank → answer
 """
@@ -15,6 +14,7 @@ import json
 from pathlib import Path
 from typing import Optional, Protocol
 from dataclasses import dataclass, field
+from collections import deque
 
 from loguru import logger
 from langchain_core.documents import Document
@@ -34,8 +34,9 @@ from rank_bm25 import BM25Okapi
 # Config
 # ──────────────────────────────────────────────
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_LOCAL_EMBEDDING = "sentence-transformers/all-mpnet-base-v2"
+TOKEN_PATTERN = re.compile(r"[\w]+", flags=re.UNICODE)
 
 
 @dataclass
@@ -48,8 +49,8 @@ class RAGConfig:
     csv_rows_per_chunk: int = 10
 
     # Retrieval
-    top_k: int = 10                         # candidates from hybrid search
-    rerank_top_n: int = 4                   # chunks passed to LLM after reranking
+    top_k: int = 12                         # candidates from hybrid search
+    rerank_top_n: int = 6                   # chunks passed to LLM after reranking
     score_threshold: float = 0.0            # 0 = disabled; filter only if > 0
     hybrid_fetch_multiplier: int = 2        # fetch top_k * N per channel before RRF
     rrf_k: int = 60                         # reciprocal rank fusion constant
@@ -73,8 +74,8 @@ class RAGConfig:
         return cls(
             chunk_size=int(os.getenv("RAG_CHUNK_SIZE", "300")),
             chunk_overlap=int(os.getenv("RAG_CHUNK_OVERLAP", "100")),
-            top_k=int(os.getenv("RAG_TOP_K", "10")),
-            rerank_top_n=int(os.getenv("RAG_RERANK_TOP_N", "4")),
+            top_k=int(os.getenv("RAG_TOP_K", "12")),
+            rerank_top_n=int(os.getenv("RAG_RERANK_TOP_N", "6")),
             score_threshold=float(os.getenv("RAG_SCORE_THRESHOLD", "0.0")),
             embedding_backend=os.getenv("RAG_EMBEDDING_BACKEND", "local"),
             embedding_model=os.getenv("RAG_EMBEDDING_MODEL", DEFAULT_LOCAL_EMBEDDING),
@@ -116,6 +117,17 @@ def chunk_text_words(text: str, chunk_size: int, overlap: int) -> list[str]:
         start = max(end - overlap, start + 1)
 
     return chunks
+
+
+def tokenize_for_search(text: str) -> list[str]:
+    """
+    Normalize text for lexical retrieval.
+
+    BM25 is very sensitive to casing and punctuation. The previous whitespace
+    split made queries like "CET1?" fail to match chunks containing "CET1" and
+    made title-cased document terms miss lower-cased query terms.
+    """
+    return TOKEN_PATTERN.findall(text.lower())
 
 
 # ──────────────────────────────────────────────
@@ -406,7 +418,7 @@ class VectorStoreManager:
             self._bm25 = None
             return
         self._bm25_docs = list(self.vectorstore.docstore._dict.values())  # noqa: SLF001
-        tokenized = [doc.page_content.split() for doc in self._bm25_docs]
+        tokenized = [tokenize_for_search(doc.page_content) for doc in self._bm25_docs]
         self._bm25 = BM25Okapi(tokenized) if tokenized else None
 
     def load_or_create(self) -> bool:
@@ -479,7 +491,7 @@ class VectorStoreManager:
 
         bm25_hits: list[tuple[Document, float]] = []
         if self._bm25 and self._bm25_docs:
-            query_tokens = question.lower().split()
+            query_tokens = tokenize_for_search(question)
             bm25_scores = self._bm25.get_scores(query_tokens)
             ranked_indices = sorted(
                 range(len(bm25_scores)),
@@ -549,9 +561,9 @@ def rerank(
         )
         return [(doc, float(score)) for doc, score in reranked[:top_n]], True
 
-    except (ImportError, OSError):
+    except Exception as e:
         logger.warning(
-            "sentence-transformers not installed — skipping cross-encoder reranking."
+            f"Cross-encoder reranking unavailable ({e}) — using hybrid ranking."
         )
         return candidates[:top_n], False
 
@@ -565,7 +577,7 @@ def reorder_for_lost_in_middle(docs: list[Document]) -> list[Document]:
     if len(docs) <= 2:
         return docs
 
-    result = []
+    result: list[Document] = []
     left, right = 0, len(docs) - 1
     turn = "left"
 
@@ -582,14 +594,30 @@ def reorder_for_lost_in_middle(docs: list[Document]) -> list[Document]:
     return result
 
 
+def format_context_chunk(doc: Document, source_number: int) -> str:
+    """Format one retrieved chunk with stable citation metadata for the LLM."""
+    source_file = doc.metadata.get("source_file", "document")
+    page = doc.metadata.get("page")
+    chunk_index = doc.metadata.get("chunk_index", -1)
+
+    location_parts = [f"file={source_file}", f"chunk={chunk_index}"]
+    if page is not None:
+        location_parts.append(f"page={page}")
+
+    return (
+        f"[Source {source_number}: {'; '.join(location_parts)}]\n"
+        f"{doc.page_content.strip()}"
+    )
+
+
 # ──────────────────────────────────────────────
 # Prompt
 # ──────────────────────────────────────────────
 
 RAG_PROMPT = PromptTemplate(
     input_variables=["context", "question"],
-    template="""You are a knowledgeable document assistant. Answer the question using ONLY the context below.
-If the answer is not in the context, say: "I couldn't find this in the uploaded documents."
+    template="""You are a careful document question-answering assistant. Answer using ONLY the provided context.
+If the answer is not explicitly supported by the context, say exactly: "I couldn't find this in the uploaded documents."
 
 Context:
 {context}
@@ -597,10 +625,12 @@ Context:
 Question: {question}
 
 Instructions:
+- First decide whether the context contains direct evidence for the question.
 - Answer clearly and directly in complete sentences.
-- Mention which document the information comes from when possible.
+- Cite the source labels you used, e.g. [Source 1], and mention filenames when useful.
 - Do not invent facts not present in the context.
-- If the context is partially relevant, answer what you can and note any gaps.
+- If sources disagree, explain the disagreement and cite both sources.
+- If the context is partially relevant, answer only the supported part and state what is missing.
 
 Answer:""",
 )
@@ -709,8 +739,8 @@ def query(
 
     # Step 5 — LLM
     context = "\n\n---\n\n".join(
-        f"[{doc.metadata.get('source_file', 'document')}]\n{doc.page_content}"
-        for doc in reranked_docs_ordered
+        format_context_chunk(doc, i + 1)
+        for i, doc in enumerate(reranked_docs_ordered)
     )
 
     llm = ChatOpenAI(
