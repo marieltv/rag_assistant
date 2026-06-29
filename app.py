@@ -264,7 +264,7 @@ with st.sidebar:
         st.session_state["top_k"] = st.slider("Top-K candidates (hybrid)", 3, 20, 10)
         st.session_state["rerank_top_n"] = st.slider("Top-N after reranking", 1, 8, 4)
         st.session_state["score_threshold"] = st.slider(
-            "Min similarity score (0 = off)", 0.0, 1.0, 0.0, 0.05
+            "Min confidence score (0 = off)", 0.0, 1.0, 0.0, 0.05
         )
 
     filter_file = None
@@ -309,7 +309,7 @@ with st.sidebar:
 st.markdown("# Document Q&A Assistant")
 st.markdown(
     "Upload documents in the sidebar, then ask questions. "
-    "Every answer includes source citations with similarity and rerank scores."
+    "Every answer includes source citations with confidence and rerank scores."
 )
 st.divider()
 
@@ -351,7 +351,7 @@ for entry in reversed(st.session_state.history):
             ):
                 for s in entry.sources:
                     cos_html = (
-                        f'<span class="score-badge">retrieval: {s.similarity_score:.3f}</span>'
+                        f'<span class="score-badge">confidence: {s.similarity_score:.3f}</span>'
                         if s.similarity_score is not None else ""
                     )
                     rerank_html = (
