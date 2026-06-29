@@ -79,17 +79,6 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
     margin-left: 6px;
 }
 
-.rerank-badge {
-    display: inline-block;
-    background: #a78bfa22;
-    border: 1px solid #a78bfa55;
-    color: #a78bfa;
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.72rem;
-    padding: 2px 8px;
-    border-radius: 2px;
-    margin-left: 4px;
-}
 
 .not-found-msg {
     border-left: 3px solid #ff6b6b;
@@ -354,17 +343,14 @@ for entry in reversed(st.session_state.history):
                         f'<span class="score-badge">confidence: {s.similarity_score:.3f}</span>'
                         if s.similarity_score is not None else ""
                     )
-                    rerank_html = (
-                        f'<span class="rerank-badge">rerank: {s.rerank_score:.2f}</span>'
-                        if s.rerank_score is not None else ""
-                    )
+
                     page_info = f" · page {s.page}" if s.page is not None else ""
                     excerpt = s.excerpt + ("..." if len(s.excerpt) >= 300 else "")
 
                     st.markdown(
                         f"""<div class="source-card">
                         <strong>{s.file}</strong>{page_info} · chunk #{s.chunk_index}
-                        {cos_html}{rerank_html}
+                        {cos_html}
                         <br><br>{excerpt}
                         </div>""",
                         unsafe_allow_html=True,
