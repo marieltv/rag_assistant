@@ -249,9 +249,8 @@ with st.sidebar:
 
     # ── Retrieval settings ──
     with st.expander("⚙️ Advanced retrieval settings"):
-        st.caption("Hybrid BM25 + semantic search · threshold 0 = disabled")
-        st.session_state["top_k"] = st.slider("Top-K candidates (hybrid)", 3, 20, 10)
-        st.session_state["rerank_top_n"] = st.slider("Top-N after reranking", 1, 8, 4)
+        st.session_state["top_k"] = st.slider("Top-K candidates (hybrid)", 10, 50, 25)
+        st.session_state["rerank_top_n"] = st.slider("Top-N after reranking", 1, 10, 4)
         st.session_state["score_threshold"] = st.slider(
             "Min confidence score (0 = off)", 0.0, 1.0, 0.0, 0.05
         )
